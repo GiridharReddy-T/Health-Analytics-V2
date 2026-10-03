@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "Real-Time Health Analytics Lakehouse Platform"
+version = ".."
+description = "Health Lakehouse Project for wearable devices data engineering"
+authors = ["giridhar.scsvmv@gmail.com"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^."
+pyspark = "^3.5."
+pandas = "^.."
+python-dotenv = "^.."
+
+[tool.poetry.dev-dependencies]
+pytest = "^.."
+pytest-spark = "^.."
+flake = "^.."
+black = "^.."
+
+[build-system]
+requires = ["poetry-core>=.."]
+build-backend = "poetry.core.masonry.api"
