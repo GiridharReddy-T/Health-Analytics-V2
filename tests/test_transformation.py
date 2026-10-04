@@ -1,15 +1,9 @@
-import os
-
-repo_base = "/Workspace/Users/chintuchinu1687@://gmail.com"
-target_test_file = os.path.join(repo_base, "tests/test_transformation.py")
-
-with open(target_test_file, 'w') as f:
-    f.write("""import pytest
+import pytest
 from unittest.mock import MagicMock
 from src.transformation import SilverTransformer
 
 def test_clean_users_logic(spark):
-    \"\"\"Test if the transformation handles data casting rules correctly using a local Spark session.\"\"\"
+    """Test if the transformation handles data casting rules correctly using a local Spark session."""
     # 1. Setup a clean mock configuration wrapper
     config = MagicMock()
     config.db_name = "test_db"
@@ -33,6 +27,3 @@ def test_clean_users_logic(spark):
     assert "user_id" in schema_fields
     assert schema_fields["user_id"] == "long"
     assert schema_fields["device_id"] == "long"
-""")
-
-print("SUCCESS: Overwritten transformation tests to use real local Spark DataFrames!")
