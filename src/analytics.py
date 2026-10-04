@@ -41,16 +41,18 @@ class GoldAnalytics:
                 l.mac_address,
                 w.workout_id,
                 w.session_id,
-                ROUND((l.logout::long - l.login::long) / , ) AS minutes_in_gym,
-                ROUND((w.end_time::long - w.start_time::long) / , ) AS minutes_exercising
+                -- FIX: Convert second differences to minutes by dividing by 60
+                ROUND((l.logout::long - l.login::long) / 60) AS minutes_in_gym,
+                ROUND((w.end_time::long - w.start_time::long) / 60) AS minutes_exercising
             FROM {self.config.db_name}.gym_logs l
             JOIN (
                 SELECT
-                    mac_address,
-                    workout_id,
-                    session_id,
-                    start_time,
-                    end_time
+                    u.user_id,
+                    u.mac_address,
+                    w.workout_id,
+                    w.session_id,
+                    w.start_time,
+                    w.end_time
                 FROM {self.config.db_name}.completed_workouts w
                 INNER JOIN {self.config.db_name}.users u ON w.user_id = u.user_id
             ) w ON l.mac_address = w.mac_address
