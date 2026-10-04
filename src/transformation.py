@@ -39,13 +39,16 @@ class SilverTransformer:
                  .filter(F.col("topic").isNotNull())
 
     def apply_user_bins(self, df):
-        logger.info("Applying age binning...")
+        logger.info("Applying age binning and calculating generation brackets...")
+    
+    # Calculate age by finding the duration between birthdate and today's system date
         return df.withColumn("age", F.floor(F.datediff(F.current_date(), F.col("dob")) / 365.25)) \
-                 .withColumn("age_group", F.when(F.col("age") < 18, "under 18")
-                             .when(F.col("age") < 35, "18-34")
-                             .when(F.col("age") < 50, "35-49")
-                             .when(F.col("age") < 65, "50-64")
-                             .otherwise("65+"))
+                 .withColumn("age_group", 
+                     F.when(F.col("age") < 18, "under 18")
+                      .when(F.col("age") < 35, "18-34")
+                      .when(F.col("age") < 50, "35-49")
+                      .when(F.col("age") < 65, "50-64")
+                      .otherwise("65+"))
 
     def merge_workouts(self, df):
         logger.info("Merging workout sessions...")
