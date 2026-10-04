@@ -5,8 +5,14 @@ from src.config import Config
 def test_config():
     config = Config()
     assert config.env == "dev"
-    assert config.base_dir_data == "/mnt/data_zone"
-    assert config.base_dir_checkpoint == "/mnt/checkpoint"
+    
+    # Updated to verify cloud-native abfss containers on the datazone storage account
+    assert config.storage_account == "datazone"
+    assert config.base_dir_data == "abfss://raw@datazone.dfs.core.windows.net"
+    assert config.delta_zone == "abfss://delta@datazone.dfs.core.windows.net"
+    assert config.base_dir_checkpoint == "abfss://checkpoints@datazone.dfs.core.windows.net"
+    
+    # Core system variables verification
     assert config.db_name == "project_db"
     assert config.max_files_per_trigger == 1000
 
