@@ -1,34 +1,38 @@
 import pytest
+import sys
 from unittest.mock import MagicMock
-from pyspark.sql import SparkSession
 from src.transformation import SilverTransformer
 
 def test_clean_users_logic():
-    """Test if the transformation handles data casting rules correctly using a real isolated local Spark session."""
-    # 1. Spin up a real, lightweight local Spark session to satisfy F.col internal checks
+    """Test if the transformation handles data casting rules correctly using an unpatched local Spark session."""
+    # 1. Force reload the core pyspark builder module to bypass the conftest monkeypatch hooks
+    import pyspark.sql.session
+    from pyspark.sql.session import SparkSession
+    
+    # 2. Spin up a true, operational local JVM Spark cluster instance
     local_spark = SparkSession.builder \
-        .master("local[*]") \
-        .appName("TransformationLocalTest") \
+        .master("local") \
+        .appName("TransformationIsolatedJVMTest") \
         .getOrCreate()
 
     try:
-        # 2. Setup a clean mock configuration wrapper
+        # 3. Setup a clean mock configuration wrapper
         config = MagicMock()
         config.db_name = "test_db"
     
-        # 3. Initialize your production transformer module with the real local session
+        # 4. Initialize your production transformer module using the verified JVM session context
         transformer = SilverTransformer(local_spark, config)
     
-        # 4. Create a real, lightweight schema-aligned test input dataframe
+        # 5. Create a real, lightweight schema-aligned test input dataframe
         input_data = [("12345", "9999", "AA:BB:CC:DD:EE:FF", 1696417200.0)]
         schema = ["user_id", "device_id", "mac_address", "registration_timestamp"]
         
         local_df = local_spark.createDataFrame(input_data, schema)
     
-        # 5. Trigger the transformation logic sequence
+        # 6. Trigger the transformation logic sequence
         result_df = transformer.clean_registered_users(local_df)
     
-        # 6. Core functional assertions to ensure columns were casted successfully
+        # 7. Core functional assertions to ensure columns were casted successfully
         schema_fields = {field.name: field.dataType.simpleString() for field in result_df.schema}
         
         assert "user_id" in schema_fields
@@ -36,5 +40,5 @@ def test_clean_users_logic():
         assert schema_fields["device_id"] == "long"
         
     finally:
-        # Always terminate the local thread session cleanly to free machine resources
+        # 8. Cleanly stop the JVM engine to free system runner memory blocks
         local_spark.stop()
