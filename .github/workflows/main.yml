@@ -2,32 +2,37 @@ name: Data Pipeline CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, develop ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, develop ]
 
 jobs:
   test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
+      # FIX: Install Java JDK required by PySpark's JVM core engine layer
+      - name: Set up Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Explicitly install PySpark and Databricks dependencies for the test environment
           pip install pyspark pytest pytest-mock databricks-sdk
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Run Unit Tests
         run: |
-          # We set PYTHONPATH so pytest can find the src folder
           export PYTHONPATH="."
-          python -m pytest tests/
+          python -m pytest tests/ -v
