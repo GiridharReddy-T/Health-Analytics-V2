@@ -9,8 +9,10 @@ class SilverTransformer:
     def __init__(self, spark, config):
         self.spark = spark
         self.config = config
-        self.catalog = "dev_catalog"
-        self.db_name = "project_db"
+        # Read catalog from config — set by DABs variable substitution via CATALOG_NAME env var.
+        # Falls back to 'dev_catalog' when running locally outside a DABs deployment.
+        self.catalog  = getattr(config, "catalog", "dev_catalog")
+        self.db_name  = getattr(config, "db_name",  "project_db")
         self.db_prefix = f"{self.catalog}.{self.db_name}"
 
     def clean_registered_users(self, df):

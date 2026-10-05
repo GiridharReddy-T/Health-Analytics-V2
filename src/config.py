@@ -24,6 +24,7 @@ class Config:
         self.base_dir_checkpount = self.base_dir_checkpoint  # Kept to handle the test suite typo
         
         # 5. Core Platform Variables
+        self.catalog = os.getenv("CATALOG_NAME", "dev_catalog")  # overridden by DABs per target
         self.db_name = os.getenv("DB_NAME", "project_db")
         self.max_files_per_trigger = 1000
         

@@ -4,11 +4,22 @@
 # Trigger        : Databricks multi-task Job — runs after 01_Run_Pipeline.py succeeds
 # =============================================================================
 import sys
+import os
+import argparse
 import logging
 from pyspark.sql import functions as F
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ── DABs variable injection ─────────────────────────────────────────────────────
+parser = argparse.ArgumentParser()
+parser.add_argument("--catalog", default="dev_catalog", help="UC catalog (dev/test/prod)")
+parser.add_argument("--env",     default="dev",         help="Environment name")
+args, _ = parser.parse_known_args()
+
+os.environ["CATALOG_NAME"] = args.catalog
+os.environ["APP_ENV"]      = args.env
 
 repo_path = "/Workspace/Users/chintuchinu1687@gmail.com"
 if repo_path not in sys.path:
@@ -19,12 +30,13 @@ from src.setup import SetupHelper
 from src.transformation import SilverTransformer
 from src.analytics import GoldAnalytics
 
-config    = Config()
-setup     = SetupHelper(spark, config.env, catalog="dev_catalog")
-target_db = f"{setup.catalog}.{setup.db_name}"
+config    = Config()   # reads CATALOG_NAME + APP_ENV from env
+catalog   = config.catalog
+setup     = SetupHelper(spark, config.env, catalog=catalog)
+target_db = f"{catalog}.{config.db_name}"
 
-spark.sql("USE CATALOG dev_catalog")
-spark.sql("USE project_db")
+spark.sql(f"USE CATALOG {catalog}")
+spark.sql(f"USE {config.db_name}")
 
 def get_row_count(tbl):
     try:

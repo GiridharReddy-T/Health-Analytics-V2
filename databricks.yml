@@ -1,0 +1,53 @@
+# =============================================================================
+# Declarative Automation Bundle — Health Analytics V2
+# Deploy commands:
+#   databricks bundle deploy --target dev    (default)
+#   databricks bundle deploy --target test
+#   databricks bundle deploy --target prod
+# =============================================================================
+bundle:
+  name: health-analytics-v2
+
+# ── Bundle-level variables (overridden per target) ───────────────────────
+variables:
+  catalog:
+    description: Unity Catalog name for this deployment target
+    default: dev_catalog
+  env:
+    description: Environment identifier passed to pipeline scripts
+    default: dev
+
+# Resource files included from the resources/ directory
+include:
+  - resources/*.yml
+
+# ── Deployment targets ────────────────────────────────────────────────
+targets:
+
+  # Development — used by engineers for local iteration
+  dev:
+    mode: development   # prefixes job names with [dev] and runs as the deploying user
+    default: true
+    variables:
+      catalog: dev_catalog
+      env: dev
+    workspace:
+      host: https://adb-7405614261161185.5.azuredatabricks.net
+
+  # Test — deployed by Azure DevOps CI on merge to main
+  test:
+    mode: development
+    variables:
+      catalog: test_catalog
+      env: test
+    workspace:
+      host: https://adb-7405614261161185.5.azuredatabricks.net
+
+  # Production — deployed by Azure DevOps CD on release tag
+  prod:
+    mode: production    # runs as the service principal; no [dev] prefix on job names
+    variables:
+      catalog: prod_catalog
+      env: prod
+    workspace:
+      host: https://adb-7405614261161185.5.azuredatabricks.net

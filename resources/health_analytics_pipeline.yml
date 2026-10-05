@@ -1,0 +1,51 @@
+# =============================================================================
+# Job resource: Health Analytics decoupled pipeline
+# Variables ${var.catalog} and ${var.env} are substituted by the bundle target.
+# =============================================================================
+resources:
+  jobs:
+    health_analytics_pipeline:
+      name: "[${var.env}] Health Analytics Pipeline"
+      description: >
+        Decoupled Bronze ingestion → Silver transforms → Gold analytics.
+        Catalog: ${var.catalog} | Environment: ${var.env}
+
+      # ── Trigger: fires when new files land in the ADLS raw container ────────
+      trigger:
+        pause_status: UNPAUSED
+        file_arrival:
+          url: abfss://raw@datazone.dfs.core.windows.net/
+          min_time_between_triggers_seconds: 300   # 5-min cooldown between runs
+          wait_after_last_change_seconds: 60       # settle time for batch uploads
+
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+
+      environments:
+        - environment_key: Serverless
+          spec:
+            environment_version: "6"
+
+      # ── Task 1: Bronze ingestion ───────────────────────────────────────
+      tasks:
+        - task_key: bronze_ingestion
+          description: "Ingest ADLS raw files → ${var.catalog}.project_db Bronze tables"
+          environment_key: Serverless
+          spark_python_task:
+            python_file: ./01_Run_Pipeline.py
+            parameters:
+              - "--catalog=${var.catalog}"
+              - "--env=${var.env}"
+
+        # ── Task 2: Silver + Gold ──────────────────────────────────────
+        - task_key: silver_gold_transforms
+          description: "Bronze → Silver transforms + Gold analytics in ${var.catalog}"
+          depends_on:
+            - task_key: bronze_ingestion   # skipped automatically if Bronze fails
+          environment_key: Serverless
+          spark_python_task:
+            python_file: ./02_Silver_Gold_Pipeline.py
+            parameters:
+              - "--catalog=${var.catalog}"
+              - "--env=${var.env}"
