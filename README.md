@@ -1,143 +1,236 @@
 # 🏥 Health Analytics Lakehouse (V2)
 
-A modular Python package for a **Databricks + Delta Lake** pipeline that processes wearable-device health data (heart rate, workouts, gym check-ins, user profiles) through a **Medallion Architecture** (Bronze → Silver → Gold).
-
-> **V2 is a refactor of [V1](https://github.com/GiridharReddy-T/Real-Time-Health-Analytics-Lakehouse-Platform).** V1 is a notebook-based capstone with the complete Bronze/Silver/Gold logic, Databricks Asset Bundle deployment and integration tests. V2 moves the code into an importable, unit-testable `src/` package with CI. **V2 is a work in progress**, see [Project Status](#-project-status).
+A production-grade **Azure Databricks + Delta Lake** platform that processes wearable-device health data (heart rate, workouts, gym check-ins, user profiles) through a **Medallion Architecture** (Bronze → Silver → Gold) with full CI/CD, multi-environment deployment, and Unity Catalog data governance.
 
 ![Databricks](https://img.shields.io/badge/Databricks-Lakehouse-red?logo=databricks)
 ![Delta Lake](https://img.shields.io/badge/Delta-Lake-blue)
 ![PySpark](https://img.shields.io/badge/PySpark-3.5-orange?logo=apachespark)
-![CI](https://github.com/GiridharReddy-T/Health-Analytics-V2/actions/workflows/main.yml/badge.svg)
+![Azure DevOps](https://img.shields.io/badge/Azure_DevOps-CI%2FCD-0078D7?logo=azuredevops)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ---
 
 ## 📌 Overview
 
-Users wear a health-monitoring wristband that sends heart rate, workout start/stop events and gym check-ins. The platform is designed to produce two gold-layer outputs:
+Users wear a health-monitoring wristband that continuously streams heart rate, workout events, and gym check-ins. This platform ingests five event streams, cleans and enriches the data through Silver transforms, and produces two Gold outputs for Power BI:
 
-| Output | Description |
+| Gold Output | Description |
 |---|---|
 | `workout_bpm_summary` | Per-session min / avg / max heart rate with user demographics |
 | `gym_summary` | Per-visit minutes in the gym vs. minutes actively exercising |
 
+---
+
 ## 🏗️ Architecture
 
-```mermaid
-flowchart LR
-    A[Registered users CSV] --> B
-    C[Gym logins CSV] --> B
-    D[Kafka multiplex JSON] --> B
-    B[(Bronze<br/>Auto Loader → Delta)] --> S[(Silver<br/>cleaned / merged)]
-    S --> G[(Gold<br/>workout_bpm_summary<br/>gym_summary)]
+```
+ADLS Gen2  abfss://raw@datazone.dfs.core.windows.net/
+    │
+    │  File arrival trigger (60 s settle, 5 min cooldown)
+    ▼
+┌──────────────────────────────────────────────┐
+│  Job: Health Analytics — Decoupled Pipeline    │
+│                                                │
+│  Task 1 ─ bronze_ingestion                     │
+│    setup() → column masks → PII tags           │
+│    spark.read  →  Bronze Delta tables          │
+│         ↓ SUCCEEDED                            │
+│  Task 2 ─ silver_gold_transforms               │
+│    6 Silver transforms → 2 Gold outputs        │
+└──────────────────────────────────────────────┘
+    │
+    ▼
+Unity Catalog  <catalog>.project_db
 ```
 
-All tables live in Unity Catalog under `<catalog>.<db_name>` and are stored in ADLS Gen2 (`raw`, `delta` and `checkpoints` containers).
+### Medallion Layers
 
-| Layer | Tables |
-|---|---|
-| **Bronze** | `registered_users_bz`, `gym_logins_bz`, `kafka_multiplex_bz` (partitioned by `topic`, `week_part`; every row carries `load_time` and `source_file`) |
-| **Silver** | `users`, `gym_logs`, `user_profile`, `heart_rate`, `workouts`, `completed_workouts`, `workout_bpm`, `user_bins`, `date_lookup` |
-| **Gold** | `workout_bpm_summary` (table), `gym_summary` (view) |
+| Layer | Tables | Notes |
+|---|---|---|
+| **Bronze** | `registered_users_bz`, `gym_logins_bz`, `kafka_multiplex_bz` | Raw files from ADLS; every row carries `load_time` + `source_file`; `kafka_multiplex_bz` partitioned by `topic`, `week_part` |
+| **Silver** | `users`, `gym_logs`, `user_profile`, `user_bins`, `workouts`, `completed_workouts`, `workout_bpm`, `date_lookup` | Cleaned, typed, CDC delete-handled |
+| **Gold** | `workout_bpm_summary` (table), `gym_summary` (view) | Power BI ready; no PII exposed |
+
+### 5 Data Sources
+
+| # | Source | Format | Bronze Table |
+|---|---|---|---|
+| 1 | Device registration | CSV | `registered_users_bz` |
+| 2 | User profile CDC | JSON — Kafka `user_info` | `kafka_multiplex_bz` |
+| 3 | Heart rate stream | JSON — Kafka `bpm` | `kafka_multiplex_bz` |
+| 4 | Gym login / logout | CSV | `gym_logins_bz` |
+| 5 | Workout start / stop | JSON — Kafka `workout` | `kafka_multiplex_bz` |
+
+---
 
 ## 📁 Project Structure
 
 ```
 Health-Analytics-V2/
+├── databricks.yml                        # DABs bundle — dev / test / prod targets
+├── resources/
+│   └── health_analytics_pipeline.yml    # Job definition with ${var.catalog} substitution
+├── conf/
+│   └── create_test_prod_catalogs.sql    # One-time admin SQL to create test + prod catalogs
 ├── src/
-│   ├── config.py          # Config: env, ADLS paths, Key Vault-backed secrets
-│   ├── setup.py           # SetupHelper: create / validate / clean up database and tables
-│   ├── ingestion.py       # BronzeIngestor: Auto Loader streams → bronze tables
-│   ├── transformation.py  # SilverTransformer: cleaning rules + users upsert
-│   ├── analytics.py       # GoldAnalytics: BPM summary table + gym summary view
-│   └── utils.py           # Logger, schema validation helper
-├── tests/                 # pytest suite (Spark/dbutils mocked in conftest.py)
-├── notebooks/             # Databricks notebook wrappers
-├── 01_Setup.py            # Entry point: setup → bronze ingest → validate
-├── 01_Run_Pipeline.py     # Entry point: setup + validate
-├── .github/workflows/main.yml   # CI: unit tests on push / PR
+│   ├── config.py          # Reads CATALOG_NAME / APP_ENV / DB_NAME from env vars
+│   ├── setup.py           # DDL + apply_column_masks() + apply_column_tags()
+│   ├── ingestion.py       # BronzeIngestor: spark.read batch (3 sources)
+│   ├── transformation.py  # SilverTransformer: 6 methods + CDC delete fix
+│   ├── analytics.py       # GoldAnalytics: workout_bpm_summary + gym_summary
+│   └── utils.py           # Logging + schema validation helpers
+├── tests/
+│   ├── conftest.py              # Session-scoped Spark fixture; DatabricksSession fallback
+│   ├── test_config.py           # Config env var overrides
+│   ├── test_ingestion.py        # BronzeIngestor smoke test
+│   ├── test_transformation.py   # Silver + CDC delete + masking + PII tag coverage
+│   └── test_analytics.py        # GoldAnalytics smoke test
+├── 01_Run_Pipeline.py            # Bronze entry point (setup → schema → ingest)
+├── 02_Silver_Gold_Pipeline.py    # Silver + Gold entry point
+├── azure_pipeline.yml            # Azure DevOps 3-stage CI/CD
 ├── pyproject.toml
 └── LICENSE
 ```
 
+---
+
 ## ⚙️ Configuration
 
-`Config` reads:
+`Config` reads all settings from environment variables — injected automatically by DABs per target:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `APP_ENV` | `dev` | Environment name |
+| `CATALOG_NAME` | `dev_catalog` | Unity Catalog name (set by DABs) |
+| `APP_ENV` | `dev` | Environment identifier |
 | `DB_NAME` | `project_db` | Schema name |
-| `CATALOG_NAME` | `dev_catalog` | Unity Catalog (set by DABs per target) |
 
-Storage paths are built from the `datazone` storage account (`abfss://raw@…`, `abfss://delta@…`, `abfss://checkpoints@…`). Secrets (`db-password`, `kafka-key`) are read from the Databricks secret scope `health-secrets`. Never commit credentials.
+Storage paths are derived from the `datazone` ADLS Gen2 account (`abfss://raw@…`, `abfss://delta@…`). Secrets (`db-password`, `kafka-key`) are fetched from the `health-secrets` Databricks secret scope. **Never commit credentials.**
+
+---
 
 ## 🚀 Getting Started
 
-**Prerequisites:** a Databricks workspace with Unity Catalog, an ADLS Gen2 storage account with `raw`, `delta` and `checkpoints` containers, and a `health-secrets` secret scope.
+**Prerequisites:**
+- Databricks workspace with Unity Catalog + Serverless compute
+- ADLS Gen2 account `datazone` with `raw` and `delta` containers
+- UC external locations: `health_lake_location` (→ raw) and `datazone_delta_metadata` (→ delta)
+- Azure Managed Identity with Storage Blob Data Contributor on both containers
 
-1. Clone the repo into **Databricks Repos**.
-2. Land source files in the `raw` container under `registered_users_bz/`, `gym_logins_bz/` and `kafka_multiplex_bz/`.
-3. Run `01_Setup.py` to create the schema and tables and run the Bronze ingest once.
+**1. Clone into Databricks Git Folders**
 
-**Local development**
+**2. Drop source files** into the root of `abfss://raw@datazone.dfs.core.windows.net/`
 
+**3. Run manually (dev)**
 ```bash
-pip install pyspark pytest pytest-mock databricks-sdk
-PYTHONPATH=. python -m pytest tests -v
+# Open in Databricks and run in order:
+01_Run_Pipeline.py          # Bronze: schema setup + ADLS ingestion
+02_Silver_Gold_Pipeline.py  # Silver transforms + Gold analytics
 ```
 
-## 🧪 Testing & CI/CD
-
-- `tests/` holds config, transformation, ingestion and analytics tests. Spark and `dbutils` are mocked in `tests/conftest.py`, so they run without a cluster.
-- `azure_pipeline.yml` runs in Azure DevOps with 3 stages:
-
-| Stage | Trigger | Action |
-|---|---|---|
-| **CI** | every push + PR to `main`/`develop` | install deps, run pytest, publish results |
-| **Deploy Test** | merge to `main` (non-PR) | `databricks bundle deploy --target test` → `test_catalog` |
-| **Deploy Prod** | push of `v*` tag (e.g. `v1.0.0`) | `databricks bundle deploy --target prod` → `prod_catalog` (requires approval) |
-
-**Required ADO setup** (one-time):
-1. In **Pipelines → Variables**, add `DATABRICKS_HOST` (plain) and `DATABRICKS_TOKEN` (secret, lock icon)
-2. In **Pipelines → Environments**, create `test` and `production` environments. Add an approval check to `production` to gate prod deploys.
-3. Run `conf/create_test_prod_catalogs.sql` as a workspace admin to create `test_catalog` and `prod_catalog`.
-
-## 📦 Environments (DABs)
-
-The project uses a Declarative Automation Bundle (`databricks.yml`) for multi-environment deployment:
-
+**4. Deploy via DABs**
 ```bash
-# Deploy manually
-databricks bundle deploy --target dev    # → dev_catalog.project_db   (default)
+pip install databricks-cli
+databricks bundle deploy --target dev    # → dev_catalog.project_db
 databricks bundle deploy --target test   # → test_catalog.project_db
 databricks bundle deploy --target prod   # → prod_catalog.project_db
 ```
 
-Each target deploys a `[env] Health Analytics Pipeline` job with the correct catalog injected via `--catalog` / `--env` arguments.
+**Local development**
+```bash
+pip install pyspark pytest pytest-mock databricks-sdk
+PYTHONPATH=. python -m pytest tests/ -v
+```
+
+---
+
+## 🧪 Testing & CI/CD
+
+`tests/` uses a mocked Spark session (`conftest.py`) — runs fully offline, no cluster needed.
+
+| Test | What it covers |
+|---|---|
+| `test_config` | Env var overrides for `CATALOG_NAME` / `APP_ENV` / `DB_NAME` |
+| `test_bronze_ingestor` | `BronzeIngestor` initialisation |
+| `test_clean_users_logic` | `registration_timestamp` cast chain |
+| `test_user_profile_cdc_delete` | CDC delete filter — deleted users excluded from Silver |
+| `test_mac_address_masking_logic` | OUI prefix preserved, device bytes masked |
+| `test_apply_column_masks_calls_correct_sql` | 4× `SET MASK` across all mac_address tables |
+| `test_apply_column_tags_sql_coverage` | 13× `SET TAGS` across 5 tables, all 3 sensitivity tiers |
+
+**Azure DevOps 3-stage pipeline (`azure_pipeline.yml`):**
+
+| Stage | Trigger | Action |
+|---|---|---|
+| **CI** | Every push + PR → `main` / `develop` | Python 3.10, JDK 17, pytest, publish results |
+| **Deploy Test** | Merge to `main` (non-PR) | `databricks bundle deploy --target test` → `test_catalog` |
+| **Deploy Prod** | Push `v*` tag (e.g. `v1.2.0`) | `databricks bundle deploy --target prod` → `prod_catalog` |
+
+> **Deploy Prod** is gated by the `production` ADO Environment — add an approval check to require manual sign-off.
+
+**One-time ADO setup:**
+1. **Pipelines → Variables**: `DATABRICKS_HOST` (plain) + `DATABRICKS_TOKEN` (🔒 secret)
+2. **Pipelines → Environments**: create `test` and `production`; add approvers to `production`
+3. Run `conf/create_test_prod_catalogs.sql` as workspace admin
+
+---
+
+## 📦 Environments (DABs)
+
+`databricks.yml` defines three targets — each deploys `[env] Health Analytics Pipeline` with the correct Unity Catalog injected via `--catalog` / `--env` args:
+
+| Target | Catalog | Trigger |
+|---|---|---|
+| `dev` | `dev_catalog` | Manual / local (default) |
+| `test` | `test_catalog` | Azure DevOps on merge to `main` |
+| `prod` | `prod_catalog` | Azure DevOps on `v*` tag + approval |
+
+---
+
+## 🔐 Data Governance
+
+### Column masks — `mac_address`
+
+Applied to `registered_users_bz`, `gym_logins_bz`, `users`, `gym_logs` via a UC SQL masking function. Automatically inherited by the `gym_summary` Gold view.
+
+| User | Value seen |
+|---|---|
+| `data_engineers` or `admins` group | `AA:BB:CC:DD:EE:FF` (real) |
+| Everyone else | `AA:BB:CC:XX:XX:XX` (OUI kept, device bytes hidden) |
+
+### UC PII tags — 13 columns
+
+Every PII column carries `pii=true`, `sensitivity`, and `data_class` tags.
+
+| Column(s) | Table(s) | `sensitivity` | `data_class` |
+|---|---|---|---|
+| `mac_address` | 4 tables | `high` | `device_identifier` |
+| `dob`, `street_address` | `user_profile` | `high` | `date_of_birth`, `home_address` |
+| `first_name`, `last_name`, `sex`, `gender` | `user_profile` | `medium` | `personal_name`, `demographic` |
+| `city`, `state`, `zip` | `user_profile` | `low` | `location` |
+
+---
 
 ## 📊 Project Status
 
 | Area | Status |
 |---|---|
-| Table DDL, setup / validate / cleanup | ✅ Implemented |
-| Bronze ingestion (3 Auto Loader streams) | 🟡 Implemented, being stabilised |
-| Silver | 🟡 Cleaning rules written; only the `users` merge stream is wired |
-| Gold | 🟡 SQL written; not yet validated against populated tables |
-| Integration tests, test data, producer | 🔲 In V1, not yet ported |
-| Deployment (Declarative Automation Bundle) and CD | ✅ DABs + Azure DevOps 3-stage CI/CD |
+| Bronze ingestion — 5 data sources | ✅ Complete |
+| Silver transforms — 6 methods + CDC delete | ✅ Complete |
+| Gold analytics — 2 outputs verified live | ✅ Complete |
+| Date dimension (`date_lookup`) | ✅ Complete |
+| Decoupled Bronze / Silver+Gold jobs | ✅ Complete |
+| DEV / TEST / PROD via DABs | ✅ Complete |
+| Azure DevOps 3-stage CI/CD | ✅ Complete |
+| Column masks on `mac_address` | ✅ Complete |
+| UC PII tags — 13 columns | ✅ Complete |
+| Real integration tests with sample data | 🔲 Placeholder tests only |
+| Kafka producer / data simulator | 🔲 Not yet ported |
 
-## 🗺️ Roadmap
-
-- [ ] Wire all Silver streams: CDC merge for `user_profile`, dedup merges, `completed_workouts` and `workout_bpm` stream-stream joins
-- [ ] Port the V1 integration tests, sample data and producer
-- [x] Add `databricks.yml` and a CD workflow (dev → test → prod)
-- [ ] Data quality checks, monitoring and alerting
-- [ ] Replace placeholder unit tests with real Spark-backed tests
+---
 
 ## 🙋 Author
 
-**Giridhar Reddy T**: [LinkedIn](https://www.linkedin.com/in/giridhar-reddy-tatiparthi-272b94244/) · [GitHub](https://github.com/GiridharReddy-T) · [Portfolio](https://giridharreddy-t.github.io/)
+**Giridhar Reddy T** · [LinkedIn](https://www.linkedin.com/in/giridhar-reddy-tatiparthi-272b94244/) · [GitHub](https://github.com/GiridharReddy-T) · [Portfolio](https://giridharreddy-t.github.io/)
 
 ## 📄 License
 
