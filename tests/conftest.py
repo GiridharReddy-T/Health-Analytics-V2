@@ -58,15 +58,24 @@ class SafeSparkSessionWrapper:
 
 
 @pytest.fixture(scope="session")
-def spark_session():
-    """Provides a single, shared local Spark session for the test session lifecycle."""
-    spark = SparkSession.builder \
-        .master("local[*]") \
-        .appName("TransformationLocalTest") \
-        .config("spark.sql.shuffle.partitions", "1") \
-        .getOrCreate()
-    
-    yield spark
-    
-    # Ensure proper cleanup to release JVM hooks
-    spark.stop()
+def spark():
+    """Shared session-scoped Spark fixture for ALL tests.
+    Uses local[*] in CI (no Databricks cluster); falls back to DatabricksSession when available.
+    """
+    try:
+        from databricks.connect import DatabricksSession
+        session = DatabricksSession.builder.getOrCreate()
+    except Exception:
+        session = SparkSession.builder \
+            .master("local[*]") \
+            .appName("HealthPlatformTests") \
+            .config("spark.sql.shuffle.partitions", "1") \
+            .getOrCreate()
+    yield session
+    session.stop()
+
+
+@pytest.fixture(scope="session")
+def spark_session(spark):
+    """Alias kept for backward compatibility with tests that use spark_session."""
+    return spark
