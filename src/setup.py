@@ -262,6 +262,59 @@ class SetupHelper:
                 ORDER BY date, gym, l.mac_address, session_id""")
         logger.info("Done")
 
+    # ------------------------------------------------------------------ GOVERNANCE
+    def apply_column_masks(self):
+        """Create a column-masking function and apply it to every mac_address column.
+
+        Masking policy
+        --------------
+        - Members of the 'data_engineers' Databricks group, or account admins,
+          see the original value (needed for debugging and device lookups).
+        - All other users (analysts, BI tools, downstream consumers) see:
+              AA:BB:CC:XX:XX:XX
+          The OUI vendor prefix (first 3 octets) is preserved so device-type
+          analytics still work; the device-specific bytes are hidden.
+
+        Tables masked
+        -------------
+        - registered_users_bz  (Bronze)
+        - gym_logins_bz        (Bronze)
+        - users                (Silver)
+        - gym_logs             (Silver)
+        Note: gym_summary is a view — the mask is inherited automatically from
+        the underlying gym_logs table.
+
+        This method is idempotent — safe to call on every pipeline run.
+        """
+        self._require_db()
+        func_fqn = f"{self.db_prefix}.mask_mac_address"
+
+        logger.info(f"Creating PII masking function {func_fqn} ...")
+        self.spark.sql(f"""
+            CREATE OR REPLACE FUNCTION {func_fqn}(mac STRING)
+            RETURNS STRING
+            RETURN CASE
+                WHEN is_member('data_engineers') OR is_account_admin() THEN mac
+                ELSE CONCAT(SUBSTR(mac, 1, 8), ':XX:XX:XX')
+            END
+        """)
+
+        mac_tables = [
+            "registered_users_bz",  # Bronze — raw device registrations
+            "gym_logins_bz",         # Bronze — raw gym check-ins
+            "users",                  # Silver — clean user profiles
+            "gym_logs",               # Silver — login/logout sessions
+        ]
+        for tbl in mac_tables:
+            logger.info(f"Applying mac_address mask to {self.db_prefix}.{tbl} ...")
+            self.spark.sql(f"""
+                ALTER TABLE {self.db_prefix}.{tbl}
+                ALTER COLUMN mac_address
+                SET MASK {func_fqn}
+            """)
+
+        logger.info("mac_address column masks applied to all PII tables.")
+
     # =====================================================================
     # LIFECYCLE METHODS (setup, validate, cleanup)
     # =====================================================================
@@ -290,6 +343,9 @@ class SetupHelper:
         # Gold
         self.create_workout_bpm_summary()
         self.create_gym_summary()
+
+        # Governance — PII column masks (idempotent: re-applying on each run is safe)
+        self.apply_column_masks()
         logger.info(f"Setup completed in {int(time.time()) - start} seconds")
 
     def assert_table(self, table_name: str):
@@ -303,7 +359,7 @@ class SetupHelper:
         logger.info(f"Found {table_name} table in {self.db_prefix}: Success")
 
     def validate(self):
-        """Check that the database and all 14 tables/views exist."""
+        """Check that the database, all 14 tables/views, and the PII masking function exist."""
         start = int(time.time())
         logger.info("Starting setup validation ...")
 
@@ -322,6 +378,16 @@ class SetupHelper:
             "workout_bpm_summary", "gym_summary",                                          # Gold
         ):
             self.assert_table(table)
+
+        # Confirm PII masking function is registered
+        mask_count = (
+            self.spark.sql(f"SHOW FUNCTIONS IN {self.db_prefix}")
+            .filter("function == 'mask_mac_address'")
+            .count()
+        )
+        self._check(mask_count == 1,
+                    f"PII masking function {self.db_prefix}.mask_mac_address is missing")
+        logger.info(f"Found masking function {self.db_prefix}.mask_mac_address: Success")
         logger.info(f"Setup validation completed in {int(time.time()) - start} seconds")
 
     def cleanup(self):

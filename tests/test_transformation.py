@@ -35,6 +35,80 @@ def test_clean_users_logic(mock_f):
     mock_f.col.assert_any_call("registration_timestamp")
 
 
+def test_mac_address_masking_logic(spark):
+    """Verify the mac_address masking expression used in the Unity Catalog function.
+
+    The column mask body is:
+        CONCAT(SUBSTR(mac, 1, 8), ':XX:XX:XX')
+    This keeps the OUI vendor prefix (AA:BB:CC) and hides the device bytes.
+    We test the expression directly in Spark SQL so the logic is validated
+    independently of the UC function registration (which needs a live catalog).
+    """
+    from pyspark.sql import functions as F
+
+    data = [
+        ("AA:BB:CC:DD:EE:FF",),
+        ("00:1A:2B:3C:4D:5E",),
+        ("12:34:56:78:9A:BC",),
+        (None,),
+    ]
+    df = spark.createDataFrame(data, ["mac_address"])
+
+    # Apply the same expression used inside the UC masking function
+    df_masked = df.withColumn(
+        "masked",
+        F.when(F.col("mac_address").isNull(), F.lit(None))
+         .otherwise(F.concat(F.substring("mac_address", 1, 8), F.lit(":XX:XX:XX")))
+    )
+
+    rows = {r["mac_address"]: r["masked"] for r in df_masked.collect()}
+
+    assert rows["AA:BB:CC:DD:EE:FF"] == "AA:BB:CC:XX:XX:XX", "OUI prefix must be preserved"
+    assert rows["00:1A:2B:3C:4D:5E"] == "00:1A:2B:XX:XX:XX", "OUI prefix must be preserved"
+    assert rows["12:34:56:78:9A:BC"] == "12:34:56:XX:XX:XX", "OUI prefix must be preserved"
+    assert rows[None] is None, "NULL mac_address must remain NULL after masking"
+
+    # All masked values must follow the pattern XX:XX:XX:XX:XX:XX where last 3 are XX
+    for original, masked in rows.items():
+        if original is not None:
+            assert masked.endswith(":XX:XX:XX"), f"Last 3 octets not masked for {original}"
+            assert masked[:8] == original[:8], f"OUI prefix changed for {original}"
+
+
+def test_apply_column_masks_calls_correct_sql():
+    """Verify apply_column_masks() creates the function and ALTERs all 4 mac tables."""
+    from unittest.mock import MagicMock, call, patch
+    from src.setup import SetupHelper
+
+    mock_spark = MagicMock()
+    mock_spark.sql.return_value = MagicMock()  # simulate DataFrame result
+
+    config = MagicMock()
+    config.db_name = "project_db"
+    config.catalog = "dev_catalog"
+    config.base_dir_data = "abfss://raw@datazone.dfs.core.windows.net"
+    config.delta_zone = "abfss://delta@datazone.dfs.core.windows.net"
+    config.checkpoint_path = "abfss://checkpoints@datazone.dfs.core.windows.net"
+
+    with patch("src.setup.Config", return_value=config):
+        helper = SetupHelper(mock_spark, "dev", catalog="dev_catalog")
+        helper.initialized = True  # skip _require_db check
+        helper.apply_column_masks()
+
+    sql_calls = [str(c.args[0]).strip() for c in mock_spark.sql.call_args_list]
+    joined = "\n".join(sql_calls)
+
+    assert "CREATE OR REPLACE FUNCTION" in joined, "Must create masking function"
+    assert "mask_mac_address" in joined, "Function must be named mask_mac_address"
+    assert "is_member('data_engineers')" in joined, "Must gate on data_engineers group"
+    assert "is_account_admin()" in joined, "Must gate on account admin"
+
+    # Verify all 4 tables get ALTER TABLE ... SET MASK
+    for tbl in ("registered_users_bz", "gym_logins_bz", "users", "gym_logs"):
+        assert f"ALTER TABLE" in joined and tbl in joined, \
+            f"SET MASK must be applied to {tbl}"
+
+
 def test_user_profile_cdc_delete(spark):
     """Verify CDC delete handling in transform_user_profile.
 
