@@ -1,6 +1,7 @@
 import pytest
 import sys
 import builtins
+from pyspark.sql import SparkSession
 from unittest.mock import MagicMock
 
 # Create a robust mock for dbutils secrets management
@@ -54,10 +55,18 @@ class SafeSparkSessionWrapper:
             return mock_session
 
 # Inject our adapter straight into the active Python system module tree before test files compile
-import pyspark.sql
-pyspark.sql.SparkSession = SafeSparkSessionWrapper
+
 
 @pytest.fixture(scope="session")
-def spark():
-    """Provides the shared cluster session environment context to fixtures."""
-    return SafeSparkSessionWrapper.getActiveSession()
+def spark_session():
+    """Provides a single, shared local Spark session for the test session lifecycle."""
+    spark = SparkSession.builder \
+        .master("local[*]") \
+        .appName("TransformationLocalTest") \
+        .config("spark.sql.shuffle.partitions", "1") \
+        .getOrCreate()
+    
+    yield spark
+    
+    # Ensure proper cleanup to release JVM hooks
+    spark.stop()

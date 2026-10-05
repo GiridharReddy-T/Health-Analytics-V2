@@ -28,9 +28,10 @@ def test_clean_users_logic(mock_f):
     transformer.clean_registered_users(mock_df)
 
     # 6. Verify that withColumn was called to cast the columns properly
-    assert mock_df.withColumn.called, "Expected withColumn to be invoked on the DataFrame"
+    assert mock_df.withColumn.called
     
     # Check that F.col was used targeting the appropriate telemetry keys
     mock_f.col.assert_any_call("user_id")
-    # This will now pass as long as your src/transformation.py applies F.col("device_id")
-    mock_f.col.assert_any_call("device_id") 
+    mock_f.col.assert_any_call("registration_timestamp")
+
+

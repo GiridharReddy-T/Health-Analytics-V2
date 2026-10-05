@@ -9,101 +9,86 @@ class BronzeIngestor:
     def __init__(self, spark: SparkSession, env: str):
         self.spark = spark
         Conf = Config()
-        self.landing_zone = Conf.base_dtr_data + "/raw"
+        self.landing_zone = Conf.base_dtr_data  # abfss://raw@datazone.dfs.core.windows.net
         self.checkpoint_base = Conf.base_dir_checkpount + "/checkpoint"
         self.catalog = env
         self.db_name = Conf.db_name
         
-    def consume_user_registration(self, once=True, processing_time="5 seconds"):
-        from pyspark.sql import functions as F
-        schema = "user_id long, device_id long, mac_address string, registration_timestamp double"
-        
-        df_stream = (self.spark.readStream
-                        .format("cloudFiles")
-                        .schema(schema)
-                        .option("maxFilesPerTrigger", 1)
-                        .option("cloudFiles.format", "csv")
-                        .option("header", "true")
-                        .load(self.landing_zone + "/registered_users_bz")
-                        .withColumn("load_time", F.current_timestamp()) 
-                        .withColumn("source_file", F.col("_metadata.file_path")))
-        
-        writer = (df_stream.writeStream \
-                                 .format("delta") \
-                                 .option("checkpointLocation", self.checkpoint_base + "/registered_users_bz") \
-                                 .outputMode("append") \
-                                 .queryName("registered_users_bz_ingestion_stream"))
-        
-        if once:
-            return writer.trigger(availableNow=True).toTable(f"{self.catalog}.{self.db_name}.registered_users_bz")
-        return writer.trigger(processingTime=processing_time).toTable(f"{self.catalog}.{self.db_name}.registered_users_bz")
-        
-    # --- GYM LOGINS (CSV) ---         
-    def consume_gym_logins(self, once=True, processing_time="5 seconds"):
-        from pyspark.sql import functions as F
-        schema = "mac_address string, gym bigint, login double, logout double"
-        
-        df_stream = (self.spark.readStream 
-                        .format("cloudFiles") 
-                        .schema(schema) 
-                        .option("maxFilesPerTrigger", 1) 
-                        .option("cloudFiles.format", "csv") 
-                        .option("header", "true") 
-                        .load(self.landing_zone + "/gym_logins_bz") 
-                        .withColumn("load_time", F.current_timestamp())
-                        .withColumn("source_file", F.col("_metadata.file_path"))
-                    )
-        
-        # Use append mode because bronze layer is expected to insert only from source
-        writer = (df_stream.writeStream \
-                                 .format("delta") \
-                                 .option("checkpointLocation", self.checkpoint_base + "/gym_logins_bz") \
-                                 .outputMode("append") \
-                                 .queryName("gym_logins_bz_ingestion_stream"))
-        
-        if once:
-            return writer.trigger(availableNow=True).toTable(f"{self.catalog}.{self.db_name}.gym_logins_bz")
-        return writer.trigger(processingTime=processing_time).toTable(f"{self.catalog}.{self.db_name}.gym_logins_bz")
-        
-# --- KAFKA MULTIPLEX (JSON) ---        
-    def consume_kafka_multiplex(self, once=True, processing_time=" seconds"):
-        schema = "key string, value string, topic string, partition bigint, offset bigint, timestamp bigint"
-        df_date_lookup = spark.table(f"{self.catalog}.{self.db_name}.date_lookup").select("date", "week_part")
-        
-        df_stream = (self.spark.readStream
-                        .format("cloudFiles")
-                        .schema(schema)
-                        .option("maxFilesPerTrigger", )
-                        .option("cloudFiles.format", "json")
-                        .load(self.landing_zone + "/kafka_multiplex_bz")                        
-                        .withColumn("load_time", F.current_timestamp())       
-                        .withColumn("source_file", F.col("_metadata.file_path"))
-                        .join(F.broadcast(df_date_lookup), 
-                              [F.to_date((F.col("timestamp")/1000).cast("timestamp")) == F.col("date")], 
-                              "left"))
-        
-        # Use append mode because bronze layer is expected to insert only from source
-        writer = (df_stream.writeStream
-                             .format("delta")
-                             .option("checkpointLocation", self.checkpoint_base + "/kafka_multiplex_bz")
-                             .outputMode("append")
-                             .queryName("kafka_multiplex_bz_ingestion_stream"))
-        if once:
-            return writer.trigger(availableNow=True).toTable(f"{self.catalog}.{self.db_name}.kafka_multiplex_bz")
-        return writer.trigger(processingTime=processing_time).toTable(f"{self.catalog}.{self.db_name}.kafka_multiplex_bz")
-        
-# --- MASTER ORCHESTRATOR ---            
-    def consume(self, once=True, processing_time="5 seconds"):
+    # --- REGISTERED USERS (CSV batch) ---
+    def consume_user_registration(self):
+        """Batch-read registered_users CSV files from ADLS raw container → Bronze Delta table.
+        NOTE: Auto Loader streaming (availableNow=True) hangs indefinitely on Serverless/Spark
+        Connect. Use this reliable batch approach + a Databricks Job file-arrival trigger for
+        event-driven execution when new files land in ADLS.
+        """
+        schema = "user_id string, device_id long, mac_address string, registration_timestamp string"
+        self.spark.sql(f"USE CATALOG {self.catalog}")
+        self.spark.sql(f"USE {self.db_name}")
+        (self.spark.read
+            .format("csv")
+            .schema(schema)
+            .option("header", "true")
+            .option("pathGlobFilter", "*registered_users*.csv")
+            .load(self.landing_zone)
+            .withColumns({"load_time": F.current_timestamp(), "source_file": F.col("_metadata.file_path")})
+            .write.format("delta").mode("overwrite").option("overwriteSchema", "true")
+            .saveAsTable(f"{self.catalog}.{self.db_name}.registered_users_bz"))
+        logger.info("registered_users_bz Bronze table loaded from ADLS.")
+
+    # --- GYM LOGINS (CSV batch) ---
+    def consume_gym_logins(self):
+        """Batch-read gym_logins CSV files from ADLS raw container → Bronze Delta table."""
+        schema = "mac_address string, gym bigint, login string, logout string"
+        self.spark.sql(f"USE CATALOG {self.catalog}")
+        self.spark.sql(f"USE {self.db_name}")
+        (self.spark.read
+            .format("csv")
+            .schema(schema)
+            .option("header", "true")
+            .option("pathGlobFilter", "*gym_logins*.csv")
+            .load(self.landing_zone)
+            .withColumns({"load_time": F.current_timestamp(), "source_file": F.col("_metadata.file_path")})
+            .write.format("delta").mode("overwrite").option("overwriteSchema", "true")
+            .saveAsTable(f"{self.catalog}.{self.db_name}.gym_logins_bz"))
+        logger.info("gym_logins_bz Bronze table loaded from ADLS.")
+
+    # --- KAFKA MULTIPLEX (JSON batch) ---
+    def consume_kafka_multiplex(self):
+        """Batch-read Kafka JSON files from ADLS raw container → Bronze Delta table.
+        Glob *_*.json matches user_info/bpm/workout; excludes date-lookup (no underscore).
+        """
+        schema = "key string, value string, topic string, partition long, offset long, timestamp long"
+        self.spark.sql(f"USE CATALOG {self.catalog}")
+        self.spark.sql(f"USE {self.db_name}")
+        (self.spark.read
+            .format("json")
+            .schema(schema)
+            .option("pathGlobFilter", "*_*.json")
+            .load(self.landing_zone)
+            .withColumns({
+                "date": F.to_date(F.from_unixtime(F.col("timestamp"))),
+                "week_part": F.concat(
+                    F.year(F.from_unixtime(F.col("timestamp"))).cast("string"),
+                    F.lit("-"),
+                    F.weekofyear(F.from_unixtime(F.col("timestamp"))).cast("string")
+                ),
+                "load_time": F.current_timestamp(),
+                "source_file": F.col("_metadata.file_path")
+            })
+            .write.format("delta").mode("overwrite").option("overwriteSchema", "true")
+            .saveAsTable(f"{self.catalog}.{self.db_name}.kafka_multiplex_bz"))
+        logger.info("kafka_multiplex_bz Bronze table loaded from ADLS.")
+
+    # --- MASTER ORCHESTRATOR ---
+    def consume(self):
+        """Run all three Bronze batch ingestions sequentially."""
         import time
         start = int(time.time())
-        logger.info(f"\nStarting bronze layer consumption ...")
-        self.consume_user_registration(once, processing_time) 
-        self.consume_gym_logins(once, processing_time) 
-        self.consume_kafka_multiplex(once, processing_time)
-        if once:
-            for stream in spark.streams.active:
-                stream.awaitTermination()
-        logger.info(f"Completed bronze layer consumtion {int(time.time()) - start} seconds")
+        logger.info("Starting Bronze layer batch ingestion from ADLS raw container...")
+        self.consume_user_registration()
+        self.consume_gym_logins()
+        self.consume_kafka_multiplex()
+        logger.info(f"Bronze layer ingestion completed in {int(time.time()) - start} seconds")
         
 # --- VALIDATION ---       
     def assert_count(self, table_name, expected_count, filter_expr="true"):

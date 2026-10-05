@@ -1,171 +1,181 @@
 import sys
 import os
+import logging
+from pyspark.sql import functions as F
 
-# 1. Establish the verified repository root path context
-repo_path = "/Workspace/Users/chintuchinu1687@gmail.com/Health-Analytics-V2"
+
+# Configure basic logging profile parameters
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Establish the verified repository root path context
+repo_path = "/Workspace/Users/chintuchinu1687@gmail.com"
 if repo_path not in sys.path:
     sys.path.insert(0, repo_path)
 
-# 2. Safe component package imports
 from src.config import Config
 from src.setup import SetupHelper
 from src.ingestion import BronzeIngestor
 from src.transformation import SilverTransformer
 from src.analytics import GoldAnalytics
 
-# 3. Initialize Configuration and force cloud storage paths
 config = Config()
-config.base_dir_data = "abfss://raw@datazone.dfs.core.windows.net"
-config.delta_zone = "abfss://delta@datazone.dfs.core.windows.net"
-config.checkpoint_path = "abfss://checkpoints@datazone.dfs.core.windows.net"
+setup = SetupHelper(spark, config.env, catalog="dev_catalog")
 
-# Explicitly declare the targets using your validated three-tier catalog space
-config.db_name = "dev_catalog.project_db"
-target_db = config.db_name
+try:
+    from pyspark.dbutils import DBUtils
+    dbutils_reference = DBUtils(spark)
+except Exception:
+    dbutils_reference = None
+# Target database identifier used in row-count lookups
+target_db = f"{setup.catalog}.{setup.db_name}"
 
-# 4. Initialize SetupHelper attached to dev_catalog
-setup = SetupHelper(spark, "dev")
-setup.catalog = "dev_catalog"
-setup.db_prefix = target_db  # Enforce verified catalog naming convention
-setup.landing_zone = config.base_dir_data
-setup.delta_base = config.delta_zone
-setup.checkpoint_base = config.checkpoint_path
+# 1. Force catalog context and ensure the Unity Catalog Volume exists before using it
+print("📦 Registering Unity Catalog Volume asset configuration...")
+spark.sql("USE CATALOG dev_catalog")
+spark.sql("CREATE DATABASE IF NOT EXISTS project_db")
+spark.sql("USE project_db")
 
-# Safety helper definitions for diagnostic metric tracking
-def count_raw_files(folder_name):
-    """Safely count incoming files sitting out in the datazone raw container storage."""
+# Run the DDL statement to physically create the volume wrapper
+spark.sql("CREATE VOLUME IF NOT EXISTS dev_catalog.project_db.pipeline")
+print("✅ Unity Catalog Volume 'pipeline' is registered and ready.")
+
+# 2. Source: Azure ADLS raw container — batch reads, no streaming or checkpoints needed.
+setup.delta_base = None   # UC managed tables — no external LOCATION clause
+print("✨ Pipeline configured for batch ingestion from ADLS.")
+
+# 4. Initialize Diagnostic Metrics Safety Default State Variables
+raw_users, raw_info, raw_bpm, raw_wrk, raw_gym = 0, 0, 0, 0, 0
+bz_gym_logs, bz_users = 0, 0
+sv_users, sv_gym_logs, sv_bpm = 0, 0, 0
+gold_bpm, gold_gym = 0, 0
+
+# Defensive row metrics tracking helper
+def get_row_count(spark_session, table_name, schema_context):
+    clean_db = str(schema_context).split(".")[-1]
     try:
-        files = dbutils.fs.ls(f"{config.base_dir_data}/files/{folder_name}/")
-        return len([f for f in files if not f.isDir()])
+        return spark_session.table(f"dev_catalog.{clean_db}.{table_name}").count()
     except Exception:
-        return 0
+        try:
+            return spark_session.table(f"{clean_db}.{table_name}").count()
+        except Exception:
+            return 0
 
-def get_row_count(table_name):
-    """Safely compute table record metrics to track data drops across layers."""
-    try:
-        return spark.table(f"{target_db}.{table_name}").count()
-    except Exception:
-        return 0
-
-# 5. EXECUTION PIPELINE RUNNER
+# ==============================================================================
+# RUNNER PIPELINE STEPS
+# ==============================================================================
 print("=" * 80)
 print("🔍 STEP 1/4: LAKEHOUSE STRUCTURE & SCHEMA SETTINGS FOUNDATION")
 print("=" * 80)
-spark.sql("USE CATALOG dev_catalog")
 
-# Patch the setup helper's inner config if it maps properties internally
-if hasattr(setup, 'config'):
-    setup.config.db_name = target_db
+if hasattr(setup, 'config'): 
+    setup.config.db_name = "project_db"
 
 setup.setup()
 setup.validate()
 print("✅ Structural Architecture Setup Verified.")
 
-# -------------------------------------------------------------
-# STEP 2: BRONZE INGESTION EXECUTION & AUDIT
-# -------------------------------------------------------------
+# Source files are read directly from abfss://raw@datazone.dfs.core.windows.net by Auto Loader
+
 print("\n" + "=" * 80)
 print("📥 STEP 2/4: BRONZE INGESTION STEP-BY-STEP TRACE")
 print("=" * 80)
 
-raw_gym = count_raw_files("gym_logs")
-raw_bpm = count_raw_files("workout_bpm")
-print(f" 📂 Files Found in datazone Storage: gym_logs ({raw_gym}), workout_bpm ({raw_bpm})")
+ingestor = BronzeIngestor(spark, "dev")
+ingestor.catalog = "dev_catalog"
+ingestor.db_name = "project_db"
+ingestor.landing_zone = setup.landing_zone
+# Checkpoints enable incremental pickup: only NEW files are processed on each run.
+# Do NOT clear checkpoints on normal runs — that defeats incrementality.
+# To force a full re-ingest, manually delete the checkpoint directory and re-run.
+# Auto Loader streaming (availableNow=True) hangs indefinitely on Serverless/Spark Connect.
+# Batch reads are used here — fast, reliable, ~15s for all 3 sources.
+# For event-driven execution when new files land, use a Databricks Job with a
+# file-arrival trigger pointing at abfss://raw@datazone.dfs.core.windows.net/
 
-ingestor = BronzeIngestor(spark, config.env)
-# Force ingestor instance properties to map to dev_catalog.project_db to stop dev namespace crashes
-if hasattr(ingestor, 'config'): ingestor.config.db_name = target_db
-if hasattr(ingestor, 'db_name'): ingestor.db_name = target_db
-
-print(" ⚙️ Running Ingestion Pipeline...")
+print(" ⚙️ Running batch ingestion from ADLS...")
 try:
-    ingestor.consume()
+    ingestor.consume_user_registration()
+    ingestor.consume_gym_logins()
+    ingestor.consume_kafka_multiplex()
+    print(" ✅ Ingestion complete.")
 except Exception as e:
-    print(f" ⚠️ Ingestion warning/alert encountered: {str(e)}")
+    print(f" ⚠️ Ingestion error: {str(e)}")
 
-bz_gym_logs = get_row_count("gym_logs_bz")
-bz_users = get_row_count("registered_users_bz")
-print(f" 🎯 Row Counts Ingested into Bronze: gym_logs_bz ({bz_gym_logs}), registered_users_bz ({bz_users})")
+bz_gym_logs = get_row_count(spark, "gym_logins_bz", target_db)
+bz_users = get_row_count(spark, "registered_users_bz", target_db)
+print(f" 🎯 Row Counts Ingested into Bronze: gym_logins_bz ({bz_gym_logs}), registered_users_bz ({bz_users})")
 
-# -------------------------------------------------------------
-# STEP 3: SILVER CLEANING & CDC PIPELINE TRACE
-# -------------------------------------------------------------
 print("\n" + "=" * 80)
 print("🧼 STEP 3/4: SILVER CLEANING & TRANSFORMS AUDIT")
 print("=" * 80)
 
 transformer = SilverTransformer(spark, config)
-# Ensure the transformation context mirrors config tracking pointers
-if hasattr(transformer, 'config'): transformer.config.db_name = target_db
 
 print(" ⚙️ Running Silver CDC Operations...")
 try:
-    transformer.run_users_cdc()
+    # registered_users_bz → users
+    # .columns forces eager plan analysis inside this try block (Spark Connect lazy evaluation)
+    df_users_bz = spark.table(f"{target_db}.registered_users_bz")
+    df_users_clean = (transformer.clean_registered_users(df_users_bz)
+        .select("user_id", "device_id", "mac_address", "registration_timestamp"))
+    df_users_clean.columns  # force schema analysis before write
+    (df_users_clean
+        .write.format("delta").mode("overwrite").option("overwriteSchema", "true")
+        .saveAsTable(f"{target_db}.users"))
+    # kafka_multiplex_bz → gym_logs, workout_bpm
+    transformer.run_kafka_silver_transforms()
+    # kafka_multiplex_bz (user_info) → user_profile → user_bins (demographics + age group)
+    transformer.transform_user_profile()
+    transformer.transform_user_bins()
+    # kafka_multiplex_bz (workout) → workouts → completed_workouts (paired start/stop)
+    transformer.transform_workouts()
+    transformer.build_completed_workouts()
+    # BPM: device_id → user_id (via users) + time-range join with completed_workouts → workout_bpm
+    transformer.build_workout_bpm()
+    # raw container → date_lookup (date dimension table)
+    transformer.load_date_lookup()
+    print(" ✅ Silver transformation layer routine complete.")
 except Exception as e:
     print(f" ❌ Silver Transformation Error: {str(e)}")
-    print(" 👉 Action item: Check your transformation.py logic if you encounter a 'Column object not callable' message!")
 
-sv_users = get_row_count("users")
-sv_gym_logs = get_row_count("gym_logs")
-sv_bpm = get_row_count("workout_bpm")
-print(f" 🎯 Clean Rows in Silver: users ({sv_users}), gym_logs ({sv_gym_logs}), workout_bpm ({sv_bpm})")
+sv_users = get_row_count(spark, "users", target_db)
+sv_gym_logs = get_row_count(spark, "gym_logs", target_db)
+sv_bpm = get_row_count(spark, "workout_bpm", target_db)
+sv_user_bins = get_row_count(spark, "user_bins", target_db)
+sv_completed = get_row_count(spark, "completed_workouts", target_db)
+sv_date_lookup = get_row_count(spark, "date_lookup", target_db)
+print(f" 🎯 Clean Rows in Silver: users ({sv_users}), gym_logs ({sv_gym_logs}), workout_bpm ({sv_bpm}), user_bins ({sv_user_bins}), completed_workouts ({sv_completed}), date_lookup ({sv_date_lookup})")
 
-# -------------------------------------------------------------
-# STEP 4: GOLD AGGREGATIONS LAYER COMPILATION
-# -------------------------------------------------------------
 print("\n" + "=" * 80)
 print("📊 STEP 4/4: GOLD ANALYTICS COMPILATION & POWER BI BINDINGS")
 print("=" * 80)
-analytics = GoldAnalytics(spark, config)
 
-print(" ⚙️ Compiling Gold Performance Telemetry Summaries...")
-# Dynamic SQL patch to safeguard u.age column resolution and avoid schema drift errors
+analytics = GoldAnalytics(spark, config)
 try:
     analytics.workout_bpm_summary()
-except Exception as query_err:
-    if "age_group" in str(query_err):
-        print(" 🔧 Mismatched u.age_group target found. Applying hotfix query strategy...")
-        spark.sql(f"""
-            CREATE OR REPLACE TABLE {target_db}.workout_bpm_summary AS
-            SELECT w.user_id, w.workout_id, w.session_id, u.age AS age_group, u.gender, u.city, u.state,
-                   MIN(b.heartrate) AS min_bpm, AVG(b.heartrate) AS avg_bpm, MAX(b.heartrate) AS max_bpm, COUNT(b.heartrate) AS num_recordings
-            FROM {target_db}.workout_bpm b
-            JOIN {target_db}.completed_workouts w ON b.user_id = w.user_id AND b.workout_id = w.workout_id AND b.session_id = w.session_id
-            JOIN {target_db}.user_bins u ON b.user_id = u.user_id
-            GROUP BY w.user_id, w.workout_id, w.session_id, u.age, u.gender, u.city, u.state
-        """)
-    else:
-        print(f" ❌ Gold analytics summary error: {str(query_err)}")
-
-# Materialize gym visitor durations
-try:
     analytics.gym_summary()
 except Exception as e:
-    print(f" ❌ Gym analytics mapping error: {str(e)}")
+    print(f" ⚠️ Gold analytics tracking exception: {str(e)}")
 
-gold_bpm = get_row_count("workout_bpm_summary")
-gold_gym = get_row_count("gym_summary")
+gold_bpm = get_row_count(spark, "workout_bpm_summary", target_db)
+gold_gym = get_row_count(spark, "gym_summary", target_db)
 
-# =============================================================
-# 🧮 PIPELINE LIFECYCLE MONITORING BALANCE SHEET
-# =============================================================
 print("\n" + "=" * 80)
 print("📊 PIPELINE AUDIT BALANCE SHEET RESULT")
 print("=" * 80)
 print(f"{'Lakehouse Tier':<25} | {'Metric Property Evaluated':<28} | {'Total Count':<15}")
 print("-" * 80)
-print(f"{'1. Storage Account':<25} | {'gym_logs raw file count':<28} | {raw_gym:<15}")
-print(f"{'1. Storage Account':<25} | {'workout_bpm raw file count':<28} | {raw_bpm:<15}")
-print(f"{'2. Bronze Delta Layer':<25} | {'gym_logs_bz rows':<28} | {bz_gym_logs:<15}")
+print(f"{'1. Azure raw container':<25} | {'registered_users (Bronze)':<28} | {bz_users:<15}")
+print(f"{'1. Azure raw container':<25} | {'gym_logins (Bronze)':<28} | {bz_gym_logs:<15}")
 print(f"{'2. Bronze Delta Layer':<25} | {'registered_users_bz rows':<28} | {bz_users:<15}")
-print(f"{'3. Silver Clean Layer':<25} | {'clean users profiles count':<28} | {sv_users:<15}")
-print(f"{'3. Silver Clean Layer':<25} | {'clean gym_logs count':<28} | {sv_gym_logs:<15}")
-print(f"{'4. Gold Target (BI)':<25} | {'workout_bpm_summary rows':<28} | {gold_bpm:<15}")
-print(f"{'4. Gold Target (BI)':<25} | {'gym_summary rows':<28} | {gold_gym:<15}")
-print("=" * 80)
-
-if gold_bpm > 0 and gold_gym > 0:
-    print("🏆 SUCCESS: Data lineage is 100% green and active! Power BI is ready to refresh.")
-else:
-    print("🚨 FAULT ALIGNMENT WARNING: Review the metric tracking numbers above to isolate where rows drop to 0.")
+print(f"{'2. Bronze Delta Layer':<25} | {'gym_logins_bz rows':<28} | {bz_gym_logs:<15}")
+print(f"{'3. Silver Clean Layer':<25} | {'users (clean profiles)':<28} | {sv_users:<15}")
+print(f"{'3. Silver Clean Layer':<25} | {'gym_logs':<28} | {sv_gym_logs:<15}")
+print(f"{'3. Silver Clean Layer':<25} | {'user_bins (age groups)':<28} | {sv_user_bins:<15}")
+print(f"{'3. Silver Clean Layer':<25} | {'completed_workouts':<28} | {sv_completed:<15}")
+print(f"{'3. Silver Clean Layer':<25} | {'workout_bpm':<28} | {sv_bpm:<15}")
+print(f"{'3. Silver Clean Layer':<25} | {'date_lookup (dimension)':<28} | {sv_date_lookup:<15}")
+print(f"{'4. Gold Target (BI)':<25} | {'workout_bpm_summary':<28} | {gold_bpm:<15}")
+print(f"{'4. Gold Target (BI)':<25} | {'gym_summary (view)':<28} | {gold_gym:<15}")
 print("=" * 80)
