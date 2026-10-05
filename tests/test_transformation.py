@@ -75,6 +75,59 @@ def test_mac_address_masking_logic(spark):
             assert masked[:8] == original[:8], f"OUI prefix changed for {original}"
 
 
+def test_apply_column_tags_sql_coverage():
+    """Verify apply_column_tags() emits ALTER TABLE ... SET TAGS for every PII column.
+
+    Expected: 13 SET TAGS calls across 5 tables.
+      mac_address  → registered_users_bz, gym_logins_bz, users, gym_logs  (4)
+      user_profile → first_name, last_name, dob, sex, gender,
+                      street_address, city, state, zip                     (9)
+    """
+    from unittest.mock import MagicMock, patch
+    from src.setup import SetupHelper
+
+    mock_spark = MagicMock()
+    mock_spark.sql.return_value = MagicMock()
+
+    config = MagicMock()
+    config.db_name         = "project_db"
+    config.catalog         = "dev_catalog"
+    config.base_dir_data   = "abfss://raw@datazone.dfs.core.windows.net"
+    config.delta_zone      = "abfss://delta@datazone.dfs.core.windows.net"
+    config.checkpoint_path = "abfss://checkpoints@datazone.dfs.core.windows.net"
+
+    with patch("src.setup.Config", return_value=config):
+        helper = SetupHelper(mock_spark, "dev", catalog="dev_catalog")
+        helper.initialized = True
+        helper.apply_column_tags()
+
+    sql_calls = [str(c.args[0]) for c in mock_spark.sql.call_args_list]
+    joined    = "\n".join(sql_calls)
+
+    set_tags_calls = [s for s in sql_calls if "SET TAGS" in s]
+    assert len(set_tags_calls) == 13, \
+        f"Expected 13 SET TAGS calls, got {len(set_tags_calls)}"
+
+    # mac_address tagged in all 4 tables
+    for tbl in ("registered_users_bz", "gym_logins_bz", "users", "gym_logs"):
+        assert any(tbl in s and "mac_address" in s for s in set_tags_calls), \
+            f"mac_address must be tagged in {tbl}"
+
+    # All user_profile PII columns present
+    for col in ("first_name", "last_name", "dob", "sex", "gender",
+                "street_address", "city", "state", "zip"):
+        assert any(col in s for s in set_tags_calls), \
+            f"Column '{col}' must be tagged in user_profile"
+
+    # Tag keys and all three sensitivity tiers must appear
+    assert "'pii' = 'true'"   in joined, "pii tag must be applied"
+    assert "'sensitivity'"    in joined, "sensitivity tag must be applied"
+    assert "'data_class'"     in joined, "data_class tag must be applied"
+    assert "'high'"           in joined, "high sensitivity tier must appear"
+    assert "'medium'"         in joined, "medium sensitivity tier must appear"
+    assert "'low'"            in joined, "low sensitivity tier must appear"
+
+
 def test_apply_column_masks_calls_correct_sql():
     """Verify apply_column_masks() creates the function and ALTERs all 4 mac tables."""
     from unittest.mock import MagicMock, call, patch

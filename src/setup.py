@@ -318,6 +318,72 @@ class SetupHelper:
 
         logger.info("mac_address column masks applied to all PII tables.")
 
+    def apply_column_tags(self):
+        """Apply Unity Catalog column-level tags to all PII fields.
+
+        Tags applied
+        ------------
+        pii         = 'true'                     marks column as PII
+        sensitivity = 'high'|'medium'|'low'      data sensitivity tier
+        data_class  = <category>                 classification label
+
+        Sensitivity tiers used
+        ----------------------
+        high   — direct identifiers or sensitive attributes:
+                 mac_address, dob, street_address
+        medium — quasi-identifiers, individually low-risk but re-identifiable
+                 in combination: first_name, last_name, sex, gender
+        low    — aggregated location, widely shared:
+                 city, state, zip
+
+        Columns tagged (13 total across 5 tables)
+        -----------------------------------------
+        mac_address     registered_users_bz, gym_logins_bz, users, gym_logs
+        first_name      user_profile
+        last_name       user_profile
+        dob             user_profile
+        sex             user_profile
+        gender          user_profile
+        street_address  user_profile
+        city            user_profile
+        state           user_profile
+        zip             user_profile
+
+        UC SET TAGS is additive and idempotent — safe to re-apply on every run.
+        Requires the executing principal to have APPLY TAG on the catalog.
+        """
+        self._require_db()
+
+        # (table, column, {tag_key: tag_value})
+        tag_specs = [
+            # ── mac_address: device identifier present in 4 tables ────────────────
+            ("registered_users_bz", "mac_address",    {"pii": "true", "sensitivity": "high",   "data_class": "device_identifier"}),
+            ("gym_logins_bz",        "mac_address",    {"pii": "true", "sensitivity": "high",   "data_class": "device_identifier"}),
+            ("users",                "mac_address",    {"pii": "true", "sensitivity": "high",   "data_class": "device_identifier"}),
+            ("gym_logs",             "mac_address",    {"pii": "true", "sensitivity": "high",   "data_class": "device_identifier"}),
+            # ── user_profile: demographic PII ───────────────────────────────────
+            ("user_profile", "first_name",     {"pii": "true", "sensitivity": "medium", "data_class": "personal_name"}),
+            ("user_profile", "last_name",      {"pii": "true", "sensitivity": "medium", "data_class": "personal_name"}),
+            ("user_profile", "dob",            {"pii": "true", "sensitivity": "high",   "data_class": "date_of_birth"}),
+            ("user_profile", "sex",            {"pii": "true", "sensitivity": "medium", "data_class": "demographic"}),
+            ("user_profile", "gender",         {"pii": "true", "sensitivity": "medium", "data_class": "demographic"}),
+            ("user_profile", "street_address", {"pii": "true", "sensitivity": "high",   "data_class": "home_address"}),
+            ("user_profile", "city",           {"pii": "true", "sensitivity": "low",    "data_class": "location"}),
+            ("user_profile", "state",          {"pii": "true", "sensitivity": "low",    "data_class": "location"}),
+            ("user_profile", "zip",            {"pii": "true", "sensitivity": "low",    "data_class": "location"}),
+        ]
+
+        for tbl, col, tags in tag_specs:
+            tags_sql = ", ".join(f"'{k}' = '{v}'" for k, v in tags.items())
+            logger.info(f"Tagging {self.db_prefix}.{tbl}.{col} ({tags_sql}) ...")
+            self.spark.sql(f"""
+                ALTER TABLE {self.db_prefix}.{tbl}
+                ALTER COLUMN {col}
+                SET TAGS ({tags_sql})
+            """)
+
+        logger.info(f"UC PII column tags applied: {len(tag_specs)} columns across 5 tables.")
+
     # =====================================================================
     # LIFECYCLE METHODS (setup, validate, cleanup)
     # =====================================================================
@@ -347,8 +413,9 @@ class SetupHelper:
         self.create_workout_bpm_summary()
         self.create_gym_summary()
 
-        # Governance — PII column masks (idempotent: re-applying on each run is safe)
+        # Governance — PII column masks + UC tags (both idempotent)
         self.apply_column_masks()
+        self.apply_column_tags()
         logger.info(f"Setup completed in {int(time.time()) - start} seconds")
 
     def assert_table(self, table_name: str):
