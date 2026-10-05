@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime
 from unittest.mock import MagicMock
 from pyspark.sql import functions as F
 
@@ -90,13 +91,13 @@ def test_workout_bpm_session_isolation(spark):
 def test_gym_summary_workout_in_window(spark):
     """gym_summary: workout whose start_time falls WITHIN login/logout is included."""
     gym = spark.createDataFrame(
-        [("AA:BB:CC:11:22:33", 1, "2023-03-10 09:00:00", "2023-03-10 11:00:00")],
+        [("AA:BB:CC:11:22:33", 1, datetime(2023, 3, 10, 9, 0, 0), datetime(2023, 3, 10, 11, 0, 0))],
         "mac_address STRING, gym INT, login TIMESTAMP, logout TIMESTAMP"
     )
     workouts = spark.createDataFrame(
         [
-            ("AA:BB:CC:11:22:33", 101, 1, "2023-03-10 10:00:00", "2023-03-10 10:30:00"),  # IN window
-            ("AA:BB:CC:11:22:33", 202, 2, "2023-03-10 12:00:00", "2023-03-10 12:30:00"),  # OUTSIDE
+            ("AA:BB:CC:11:22:33", 101, 1, datetime(2023, 3, 10, 10, 0, 0), datetime(2023, 3, 10, 10, 30, 0)),  # IN window
+            ("AA:BB:CC:11:22:33", 202, 2, datetime(2023, 3, 10, 12, 0, 0), datetime(2023, 3, 10, 12, 30, 0)),  # OUTSIDE
         ],
         "mac_address STRING, workout_id INT, session_id INT, start_time TIMESTAMP, end_time TIMESTAMP"
     )
@@ -121,11 +122,11 @@ def test_gym_summary_workout_in_window(spark):
 def test_gym_summary_workout_outside_window_excluded(spark):
     """gym_summary: workout whose start_time is OUTSIDE login/logout is excluded."""
     gym = spark.createDataFrame(
-        [("AA:BB:CC:11:22:33", 1, "2023-03-10 09:00:00", "2023-03-10 10:00:00")],
+        [("AA:BB:CC:11:22:33", 1, datetime(2023, 3, 10, 9, 0, 0), datetime(2023, 3, 10, 10, 0, 0))],
         "mac_address STRING, gym INT, login TIMESTAMP, logout TIMESTAMP"
     )
     workouts = spark.createDataFrame(
-        [("AA:BB:CC:11:22:33", 202, 2, "2023-03-10 11:00:00", "2023-03-10 11:30:00")],
+        [("AA:BB:CC:11:22:33", 202, 2, datetime(2023, 3, 10, 11, 0, 0), datetime(2023, 3, 10, 11, 30, 0))],
         "mac_address STRING, workout_id INT, session_id INT, start_time TIMESTAMP, end_time TIMESTAMP"
     )
 
@@ -151,8 +152,8 @@ def test_gym_summary_minutes_calculation(spark):
     """
     data = spark.createDataFrame(
         [("AA:BB:CC:11:22:33", 1,
-          "2023-03-10 09:00:00", "2023-03-10 10:30:00",
-          "2023-03-10 09:30:00", "2023-03-10 10:00:00")],
+          datetime(2023, 3, 10, 9, 0, 0), datetime(2023, 3, 10, 10, 30, 0),
+          datetime(2023, 3, 10, 9, 30, 0), datetime(2023, 3, 10, 10, 0, 0))],
         "mac_address STRING, gym INT, "
         "login TIMESTAMP, logout TIMESTAMP, "
         "start_time TIMESTAMP, end_time TIMESTAMP"
