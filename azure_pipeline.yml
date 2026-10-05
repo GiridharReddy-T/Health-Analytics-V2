@@ -1,8 +1,32 @@
+# =============================================================================
+# Azure DevOps CI/CD Pipeline — Health Analytics V2
+#
+# Stages:
+#   CI           — runs on every push + PR (main, develop)
+#                  installs deps, runs pytest, publishes results
+#   Deploy_Test  — runs after CI passes on merge to main
+#                  databricks bundle deploy --target test  → test_catalog
+#   Deploy_Prod  — runs after CI passes on a version tag (v*)
+#                  requires manual approval via the 'production' ADO environment
+#                  databricks bundle deploy --target prod  → prod_catalog
+#
+# Required Azure DevOps pipeline variables (set in Pipelines → Variables):
+#   DATABRICKS_HOST  (plain)  : https://adb-7405614261161185.5.azuredatabricks.net
+#   DATABRICKS_TOKEN (secret) : a Databricks PAT with 'jobs' + 'workspace' permissions
+#
+# Required ADO Environments (Pipelines → Environments):
+#   test        — no approval needed (auto-deploy on merge)
+#   production  — add an approval check here to gate prod deployments
+# =============================================================================
+
 trigger:
   branches:
     include:
       - main
       - develop
+  tags:
+    include:
+      - 'v*'   # e.g. v1.0.0, v2.3.1  — triggers Deploy_Prod stage
 
 pr:
   branches:
@@ -11,45 +35,140 @@ pr:
       - develop
 
 pool:
-  # Using Ubuntu 24.04 to remain aligned with your working GitHub environment
   vmImage: 'ubuntu-24.04'
 
 variables:
-  # Ensures PySpark's JVM launcher knows exactly where to find your modules
   PYTHONPATH: '$(System.DefaultWorkingDirectory)'
+  DATABRICKS_HOST: 'https://adb-7405614261161185.5.azuredatabricks.net'
 
-steps:
-  # 1. Set up the specific Python runtime version
-  - task: UsePythonVersion@0
-    displayName: 'Set up Python 3.10'
-    inputs:
-      versionSpec: '3.10'
-      addToPath: true
+# =============================================================================
+# Stage 1 — CI: install, test, publish
+# Runs on: every push to main/develop + every PR
+# =============================================================================
+stages:
+  - stage: CI
+    displayName: 'CI — Tests'
+    jobs:
+      - job: RunTests
+        displayName: 'Install • Test • Publish'
+        steps:
 
-  # 2. Set up the Java version required by the PySpark JVM core engine layer
-  - task: JavaToolInstaller@0
-    displayName: 'Set up Java JDK 17'
-    inputs:
-      versionSpec: '17'
-      jdkArchitectureOption: 'x64'
-      jdkSourceOption: 'PreInstalled'
+          - task: UsePythonVersion@0
+            displayName: 'Set up Python 3.10'
+            inputs:
+              versionSpec: '3.10'
+              addToPath: true
 
-  # 3. Install application dependencies
-  - script: |
-      python -m pip install --upgrade pip
-      pip install pyspark pytest pytest-mock databricks-sdk
-      if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    displayName: 'Install Dependencies'
+          - task: JavaToolInstaller@0
+            displayName: 'Set up Java JDK 17'
+            inputs:
+              versionSpec: '17'
+              jdkArchitectureOption: 'x64'
+              jdkSourceOption: 'PreInstalled'
 
-  # 4. Run PyTest and capture test metrics
-  - script: |
-      python -m pytest tests/ -v --junitxml=$(Build.ArtifactStagingDirectory)/test-results.xml
-    displayName: 'Run Unit Tests'
+          - script: |
+              python -m pip install --upgrade pip
+              pip install pyspark pytest pytest-mock databricks-sdk
+              if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+            displayName: 'Install Python Dependencies'
 
-  # 5. Publish test results directly to the Azure DevOps Pipeline dashboard
-  - task: PublishTestResults@2
-    displayName: 'Publish Test Results'
-    condition: succeededOrFailed() # Runs even if your tests fail so you see the breakdown
-    inputs:
-      testResultsFiles: '$(Build.ArtifactStagingDirectory)/test-results.xml'
-      testRunTitle: 'PySpark Unit Tests'
+          - script: |
+              python -m pytest tests/ -v --junitxml=$(Build.ArtifactStagingDirectory)/test-results.xml
+            displayName: 'Run Unit Tests'
+
+          - task: PublishTestResults@2
+            displayName: 'Publish Test Results'
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFiles: '$(Build.ArtifactStagingDirectory)/test-results.xml'
+              testRunTitle: 'PySpark Unit Tests'
+
+# =============================================================================
+# Stage 2 — Deploy TEST
+# Runs on: CI passed + push to main (not on PRs, not on tag pushes)
+# Deploys the bundle job definition to test_catalog via DABs
+# =============================================================================
+  - stage: Deploy_Test
+    displayName: 'CD — Deploy to Test'
+    dependsOn: CI
+    condition: |
+      and(
+        succeeded('CI'),
+        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+        ne(variables['Build.Reason'], 'PullRequest')
+      )
+    jobs:
+      - deployment: BundleDeploy_Test
+        displayName: 'Bundle deploy → test_catalog'
+        environment: 'test'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # deployment jobs don't auto-checkout; this makes databricks.yml available
+                - checkout: self
+
+                - script: |
+                    curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                    databricks --version
+                  displayName: 'Install Databricks CLI v2'
+
+                # Validate the bundle YAML before committing to a deploy
+                - script: |
+                    databricks bundle validate --target test
+                  displayName: 'Validate bundle (test)'
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+                # Deploy the job definition to the test workspace
+                # This creates/updates the '[test] Health Analytics Pipeline' job.
+                # The job is NOT run here — it fires via file-arrival trigger.
+                - script: |
+                    databricks bundle deploy --target test
+                  displayName: 'Deploy bundle → test_catalog'
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+# =============================================================================
+# Stage 3 — Deploy PROD
+# Runs on: CI passed + push of a version tag (v*)
+# The 'production' ADO environment can have a manual approval gate.
+# =============================================================================
+  - stage: Deploy_Prod
+    displayName: 'CD — Deploy to Production'
+    dependsOn: CI
+    condition: |
+      and(
+        succeeded('CI'),
+        startsWith(variables['Build.SourceBranch'], 'refs/tags/v')
+      )
+    jobs:
+      - deployment: BundleDeploy_Prod
+        displayName: 'Bundle deploy → prod_catalog'
+        environment: 'production'   # add an approval check here in ADO Environments UI
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - script: |
+                    curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                    databricks --version
+                  displayName: 'Install Databricks CLI v2'
+
+                - script: |
+                    databricks bundle validate --target prod
+                  displayName: 'Validate bundle (prod)'
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+                - script: |
+                    databricks bundle deploy --target prod
+                  displayName: 'Deploy bundle → prod_catalog'
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
