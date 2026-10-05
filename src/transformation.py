@@ -170,7 +170,7 @@ class SilverTransformer:
 
     # ── user_info topic → user_profile ──────────────────────────────────────
     def transform_user_profile(self):
-        """Parse latest user_info record per user → user_profile silver table."""
+        """Parse latest user_info CDC record per user → user_profile silver table."""
         import time as _time
         logger.info("Transforming user_profile from kafka_multiplex_bz (user_info topic)...")
         user_schema = (
@@ -179,12 +179,22 @@ class SilverTransformer:
             "address STRUCT<street_address: STRING, city: STRING, state: STRING, zip: INT>"
         )
         df_kafka = self.spark.table(f"{self.db_prefix}.kafka_multiplex_bz")
+        # CDC event types in user_info Kafka topic:
+        #   'new'    → first profile creation   → keep
+        #   'update' → profile change            → keep (latest wins)
+        #   'delete' → user deleted profile      → EXCLUDE from Silver
+        #
+        # Strategy: row_number() picks the most recent event per user_id.
+        # After deduplication, drop any user whose latest event is 'delete'
+        # so deleted users never appear in user_profile (or downstream
+        # user_bins / workout_bpm_summary Gold tables).
         win = Window.partitionBy("user_id").orderBy(F.col("ts").desc())
         (df_kafka
             .filter(F.col("topic") == "user_info")
             .withColumn("d", F.from_json(F.col("value"), user_schema))
             .select(
                 F.col("d.user_id").alias("user_id"),
+                F.col("d.update_type").alias("update_type"),  # needed for CDC delete filter
                 F.col("d.dob").alias("dob"),
                 F.col("d.sex").alias("sex"),
                 F.col("d.gender").alias("gender"),
@@ -198,8 +208,9 @@ class SilverTransformer:
                 F.col("d.timestamp").alias("ts"),
             )
             .withColumn("_rn", F.row_number().over(win))
-            .filter("_rn == 1")
-            .drop("_rn", "ts")
+            .filter("_rn == 1")                         # latest event per user
+            .filter(F.col("update_type") != "delete")   # CDC FIX: exclude deleted users
+            .drop("_rn", "ts", "update_type")           # update_type is control metadata, not a profile field
             .write.format("delta").mode("overwrite").option("overwriteSchema", "true")
             .saveAsTable(f"{self.db_prefix}.user_profile"))
         logger.info("user_profile silver table populated.")
