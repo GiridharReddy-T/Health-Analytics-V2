@@ -101,7 +101,7 @@ def test_apply_column_masks_calls_correct_sql():
     assert "CREATE OR REPLACE FUNCTION" in joined, "Must create masking function"
     assert "mask_mac_address" in joined, "Function must be named mask_mac_address"
     assert "is_member('data_engineers')" in joined, "Must gate on data_engineers group"
-    assert "is_account_admin()" in joined, "Must gate on account admin"
+    assert "is_member('admins')" in joined,          "Must gate on admins group"
 
     # Verify all 4 tables get ALTER TABLE ... SET MASK
     for tbl in ("registered_users_bz", "gym_logins_bz", "users", "gym_logs"):

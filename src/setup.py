@@ -290,11 +290,14 @@ class SetupHelper:
         func_fqn = f"{self.db_prefix}.mask_mac_address"
 
         logger.info(f"Creating PII masking function {func_fqn} ...")
+        # Unity Catalog masking functions support is_member() and current_user().
+        # is_account_admin() is NOT a valid built-in SQL function in UC.
+        # To grant full access to additional groups, add further is_member() checks.
         self.spark.sql(f"""
             CREATE OR REPLACE FUNCTION {func_fqn}(mac STRING)
             RETURNS STRING
             RETURN CASE
-                WHEN is_member('data_engineers') OR is_account_admin() THEN mac
+                WHEN is_member('data_engineers') OR is_member('admins') THEN mac
                 ELSE CONCAT(SUBSTR(mac, 1, 8), ':XX:XX:XX')
             END
         """)
@@ -379,10 +382,13 @@ class SetupHelper:
         ):
             self.assert_table(table)
 
-        # Confirm PII masking function is registered
+        # Confirm PII masking function is registered.
+        # SHOW FUNCTIONS may return the short name ('mask_mac_address') or the fully
+        # qualified name ('dev_catalog.project_db.mask_mac_address') depending on the
+        # UC runtime; LIKE '%mask_mac_address' matches both safely.
         mask_count = (
             self.spark.sql(f"SHOW FUNCTIONS IN {self.db_prefix}")
-            .filter("function == 'mask_mac_address'")
+            .filter("function LIKE '%mask_mac_address'")
             .count()
         )
         self._check(mask_count == 1,
