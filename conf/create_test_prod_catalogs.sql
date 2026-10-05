@@ -6,27 +6,29 @@
 
 -- ── TEST catalog ──────────────────────────────────────────────────────
 CREATE CATALOG IF NOT EXISTS test_catalog
-  COMMENT 'Integration test environment — deployed automatically by Azure DevOps on merge to main';
+  COMMENT 'Integration test environment — deployed automatically by GitHub Actions on merge to main';
 
 CREATE DATABASE IF NOT EXISTS test_catalog.project_db
   COMMENT 'Health Analytics project schema (test)';
 
--- Grant the Azure DevOps service principal USE + CREATE on test
-GRANT USE CATALOG ON CATALOG test_catalog TO `<devops-service-principal>`;
-GRANT USE SCHEMA  ON DATABASE test_catalog.project_db TO `<devops-service-principal>`;
-GRANT CREATE TABLE ON DATABASE test_catalog.project_db TO `<devops-service-principal>`;
+-- Grant the GitHub Actions user USE + CREATE on test
+-- (uncomment and replace with your PAT owner email or service principal if needed)
+-- GRANT USE CATALOG  ON CATALOG  test_catalog            TO `your-email@example.com`;
+-- GRANT USE SCHEMA   ON SCHEMA   test_catalog.project_db TO `your-email@example.com`;
+-- GRANT CREATE TABLE ON SCHEMA   test_catalog.project_db TO `your-email@example.com`;
 
 -- ── PROD catalog ──────────────────────────────────────────────────────
 CREATE CATALOG IF NOT EXISTS prod_catalog
-  COMMENT 'Production environment — deployed by Azure DevOps on release tag';
+  COMMENT 'Production environment — deployed by GitHub Actions on release tag';
 
 CREATE DATABASE IF NOT EXISTS prod_catalog.project_db
   COMMENT 'Health Analytics project schema (prod)';
 
--- Grant the Azure DevOps service principal USE + CREATE on prod
-GRANT USE CATALOG ON CATALOG prod_catalog TO `<devops-service-principal>`;
-GRANT USE SCHEMA  ON DATABASE prod_catalog.project_db TO `<devops-service-principal>`;
-GRANT CREATE TABLE ON DATABASE prod_catalog.project_db TO `<devops-service-principal>`;
+-- Grant the GitHub Actions user USE + CREATE on prod
+-- (uncomment and replace with your PAT owner email or service principal if needed)
+-- GRANT USE CATALOG  ON CATALOG  prod_catalog            TO `your-email@example.com`;
+-- GRANT USE SCHEMA   ON SCHEMA   prod_catalog.project_db TO `your-email@example.com`;
+-- GRANT CREATE TABLE ON SCHEMA   prod_catalog.project_db TO `your-email@example.com`;
 
 -- ── Verify ─────────────────────────────────────────────────────────────
 SHOW CATALOGS LIKE '*_catalog';
