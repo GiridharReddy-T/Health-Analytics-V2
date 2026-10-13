@@ -230,7 +230,7 @@ Every PII column carries `pii=true`, `sensitivity`, and `data_class` tags.
 
 ## 🙋 Author
 
-**Giridhar Reddy T** · [LinkedIn](https://www.linkedin.com/in/giridhar-reddy-tatiparthi-272b94244/) · [GitHub](https://github.com/GiridharReddy-T) · [Portfolio](https://giridharreddy-t.github.io/)
+**Giridhar Reddy T** · [LinkedIn](https://www.linkedin.com/in/giridhar-reddy-tatiparthi-272b94244/) · [GitHub](https://github.com/GiridharReddy-T) · [Portfolio](https://giridharreddy-t.github.io/) · [![Architecture diagram](https://gitdiagram.com/diagram-badge.svg)](https://gitdiagram.com/giridharreddy-t/health-analytics-v2?utm_source=readme&utm_medium=badge)
 
 ## 📄 License
 
